@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "ahn4-downloader"
+version = "1.0.0"
+description = "Download, convert & merge AHN4 point-cloud tiles from the Dutch national height model"
+authors = ["Pahegi"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "ahn4_downloader"}]
+
+[tool.poetry.scripts]
+ahn4 = "ahn4_downloader.main:main"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.28"
+tqdm = "^4.64"
+shapely = "^2.0"
+matplotlib = "^3.5"
+laspy = {version = "^2.4", extras = ["lazrs"]}
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
