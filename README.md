@@ -1,6 +1,8 @@
-# AHN4 Downloader
+# AHN Downloader
 
-Download, convert & merge [AHN4](https://www.ahn.nl/) point-cloud tiles (Dutch national height model).
+Download [AHN](https://www.ahn.nl/) point-cloud tiles (Dutch national height model).
+By default downloads **AHN5 colored** tiles (with RGB from aerial photographs)
+around Amsterdam via [GeoTiles.nl](https://geotiles.citg.tudelft.nl/).
 
 ## Installation
 
@@ -11,39 +13,53 @@ poetry install
 ## Usage
 
 ```bash
-# Activate the Poetry virtualenv
 poetry shell
 
-# Interactive GUI selector
-ahn4 gui --output ./data
+# Download AHN5 colored tiles around Amsterdam (10 GB LAZ)
+ahn-downloader -o ./data
 
-# CLI: select tiles by bounding box
-ahn4 select --bbox 155000 463000 160000 468000
+# Convert to LAS after downloading
+ahn-downloader -o ./data --las
 
-# CLI: contiguous area around a point, budget 20 GB
-ahn4 select --center 155000 463000 --max-size 20
+# Bigger area
+ahn-downloader -o ./data --max-size 20
 
-# Download tiles and convert to LAS
-ahn4 download --center 121000 487000 --max-size 10 --output ./data --las
+# Custom center point
+ahn-downloader -o ./data --center 155000 463000 --max-size 10
 
-# Download tiles (LAZ only)
-ahn4 download --bbox 155000 463000 160000 468000 --output ./data
+# Bounding box selection
+ahn-downloader -o ./data --bbox 119000 485000 123000 489000
 
-# Full pipeline: select → download → convert
-ahn4 pipeline --center 155000 463000 --max-size 20 --output ./data
+# Preview what would be downloaded (no download)
+ahn-downloader --dry-run
+ahn-downloader --dry-run --max-size 20
 
-# Convert LAZ → LAS
-ahn4 convert --input ./data/laz --output ./data/las
+# Download original AHN4 (no color)
+ahn-downloader -o ./data --source ahn4
+```
 
-# Merge files into chunks (requires PDAL)
-ahn4 merge --input ./data --output ./data/merged --chunk-size 4
+### Utility commands
+
+```bash
+# Convert existing LAZ → LAS
+ahn-downloader convert -i ./data -o ./data/las
+
+# Merge tiles into chunks (requires PDAL)
+ahn-downloader merge -i ./data -o ./data/merged --chunk-size 4
+
+# Interactive map selector
+ahn-downloader gui -o ./data
 ```
 
 Coordinates are in **EPSG:28992** (Amersfoort / RD New).
+Default center is Amsterdam (121000, 487000). Default budget is 10 GB LAZ.
+
+> **Note:** Not all AHN5 tiles are available yet. GeoTiles.nl limits
+> parallel connections; the downloader caps threads automatically.
 
 ## Tile index
 
-The file `ahn4_downloader/index.json` contains the AHN4 tile grid (kaartbladindex)
+The file `ahn_downloader/index.json` contains the AHN4 tile grid (kaartbladindex)
 sourced from the [PDOK ATOM download service](https://service.pdok.nl/rws/ahn/atom/index.xml).
 It maps tile names to their polygon footprints in EPSG:28992. The actual LAZ files
 are served by [basisdata.nl](https://basisdata.nl/hwh-ahn/ahn4/01_LAZ/).

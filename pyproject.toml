@@ -1,14 +1,14 @@
 [tool.poetry]
-name = "ahn4-downloader"
+name = "ahn-downloader"
 version = "1.0.0"
 description = "Download, convert & merge AHN4 point-cloud tiles from the Dutch national height model"
 authors = ["Pahegi"]
 license = "MIT"
 readme = "README.md"
-packages = [{include = "ahn4_downloader"}]
+packages = [{include = "ahn_downloader"}]
 
 [tool.poetry.scripts]
-ahn4 = "ahn4_downloader.main:main"
+ahn-downloader = "ahn_downloader.main:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"

@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -12,15 +13,35 @@ from shapely.strtree import STRtree
 from tqdm import tqdm
 
 INDEX_PATH = Path(__file__).parent / "index.json"
-FALLBACK_TILE_SIZE_GB = 4.4  # used only when remote HEAD fails
+FALLBACK_TILE_SIZE_GB = 4.4      # full AHN4 tile, used when remote HEAD fails
+FALLBACK_SUBTILE_SIZE_GB = 0.3   # one AHN5 colored sub-tile (~300 MiB)
+
+
+class DataSource(Enum):
+    """Available point-cloud data sources."""
+
+    AHN4 = "ahn4"
+    AHN5_COLORED = "ahn5-colored"
+
+
+# Max parallel downloads per source (geotiles enforces a 10-connection limit)
+SOURCE_MAX_THREADS = {
+    DataSource.AHN4: 5,
+    DataSource.AHN5_COLORED: 8,
+}
+
+# Sub-tile suffixes for geotiles colored products (5×5 grid → 25 sub-tiles)
+SUBTILE_SUFFIXES = [f"{i:02d}" for i in range(1, 26)]
 
 
 @dataclass
 class Tile:
-    """Represents a single AHN4 map tile."""
+    """Represents a single AHN map tile."""
 
     name: str
     polygon: Polygon
+    source: DataSource = field(default=DataSource.AHN4)
+    subtile: str | None = field(default=None)
     centroid: Point = field(init=False)
     size_bytes: int | None = field(default=None, repr=False)
 
@@ -29,24 +50,60 @@ class Tile:
 
     @property
     def download_url(self) -> str:
+        if self.source == DataSource.AHN5_COLORED:
+            suffix = self.subtile or "01"
+            return (
+                f"https://geotiles.citg.tudelft.nl/AHN5_T/"
+                f"{self.name}_{suffix}.LAZ"
+            )
         return f"https://basisdata.nl/hwh-ahn/ahn4/01_LAZ/C_{self.name}.LAZ"
 
     @property
     def filename(self) -> str:
+        if self.source == DataSource.AHN5_COLORED:
+            suffix = self.subtile or "01"
+            return f"{self.name}_{suffix}.laz"
         return f"C_{self.name}.laz"
 
     @property
     def size_gb(self) -> float:
-        """Size in GB (uses fallback when not yet queried)."""
+        """Size in GB (uses fallback when not yet queried).
+
+        For AHN5 colored main tiles (before sub-tile expansion), the queried
+        size represents a single sub-tile.  Multiply by 25 so the BFS budget
+        accounts for all sub-tiles that will be downloaded.
+        """
         if self.size_bytes is not None:
-            return self.size_bytes / (1024 ** 3)
+            gb = self.size_bytes / (1024 ** 3)
+            if self.source == DataSource.AHN5_COLORED and self.subtile is None:
+                gb *= 25
+            return gb
+        if self.source == DataSource.AHN5_COLORED:
+            if self.subtile is None:
+                return FALLBACK_SUBTILE_SIZE_GB * 25
+            return FALLBACK_SUBTILE_SIZE_GB
         return FALLBACK_TILE_SIZE_GB
+
+    def expand_subtiles(self) -> list["Tile"]:
+        """Expand this tile into 25 colored sub-tiles (AHN5 only)."""
+        if self.source != DataSource.AHN5_COLORED:
+            return [self]
+        return [
+            Tile(
+                name=self.name,
+                polygon=self.polygon,
+                source=self.source,
+                subtile=suffix,
+            )
+            for suffix in SUBTILE_SUFFIXES
+        ]
 
 
 class TileIndex:
-    """Loads and queries the AHN4 tile index."""
+    """Loads and queries the AHN tile index."""
 
-    def __init__(self, index_path: Path = INDEX_PATH):
+    def __init__(self, index_path: Path = INDEX_PATH, source: DataSource = DataSource.AHN4):
+        self.source = source
         self.tiles: list[Tile] = []
         self._load(index_path)
         # Build spatial index for fast intersection queries
@@ -63,7 +120,7 @@ class TileIndex:
             coords = feature["geometry"]["coordinates"][0]
             polygon = Polygon(coords)
             if polygon.is_valid and not polygon.is_empty:
-                self.tiles.append(Tile(name=name, polygon=polygon))
+                self.tiles.append(Tile(name=name, polygon=polygon, source=self.source))
 
     # ------------------------------------------------------------------
     # Remote size queries
@@ -149,11 +206,10 @@ class TileIndex:
                 return []
             seed = dists[0][0]
 
-        max_size_bytes = max_size_gb * (1024 ** 3)
         center_pt = Point(center_x, center_y)
 
         selected_list: list[Tile] = []
-        used_bytes: float = 0
+        used_gb: float = 0
         visited: set[str] = set()
 
         queue: list[tuple[float, Tile]] = [(seed.centroid.distance(center_pt), seed)]
@@ -167,11 +223,11 @@ class TileIndex:
             if query_sizes and tile.size_bytes is None:
                 self.fetch_remote_sizes([tile])
 
-            tile_bytes = tile.size_bytes if tile.size_bytes else FALLBACK_TILE_SIZE_GB * (1024 ** 3)
-            if used_bytes + tile_bytes > max_size_bytes:
+            tile_gb = tile.size_gb
+            if used_gb + tile_gb > max_size_gb:
                 continue  # skip but keep checking smaller neighbours
 
-            used_bytes += tile_bytes
+            used_gb += tile_gb
             selected_list.append(tile)
 
             # Find neighbours: tiles that touch or overlap
@@ -205,13 +261,12 @@ class TileIndex:
 
             center = bbox_geom.centroid
             tiles.sort(key=lambda t: t.centroid.distance(center))
-            budget = max_size_gb * (1024 ** 3)
             kept: list[Tile] = []
             used = 0.0
             for t in tiles:
-                t_bytes = t.size_bytes if t.size_bytes else FALLBACK_TILE_SIZE_GB * (1024 ** 3)
-                if used + t_bytes <= budget:
-                    used += t_bytes
+                t_gb = t.size_gb
+                if used + t_gb <= max_size_gb:
+                    used += t_gb
                     kept.append(t)
             tiles = kept
 
@@ -230,12 +285,14 @@ class TileIndex:
         has_real = all(t.size_bytes is not None for t in tiles)
         qualifier = "" if has_real else " (estimated)"
         est_las = est_laz * 5
+        source_label = self.source.value
         lines = [
+            f"Source         : {source_label}",
             f"Tiles selected : {len(tiles)}",
             f"LAZ size{qualifier:8s}: {est_laz:.2f} GB",
             f"LAS size{qualifier:8s}: {est_las:.2f} GB",
         ]
         if tiles:
-            names = [t.name for t in tiles]
-            lines.append(f"Tile names     : {', '.join(sorted(names))}")
+            names = sorted({t.name for t in tiles})
+            lines.append(f"Tile names     : {', '.join(names)}")
         return "\n".join(lines)
