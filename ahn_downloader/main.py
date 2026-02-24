@@ -7,14 +7,22 @@ Examples
 --------
   ahn-downloader -o ./data                        # AHN5 colored, Amsterdam, 10 GB LAZ
   ahn-downloader -o ./data --las                  # same, converted to LAS
+  ahn-downloader -o ./data --las --point-format 7 # convert to LAS format 7
+  ahn-downloader -o ./data --validate             # validate files after download
+  ahn-downloader -o ./data --validate --verbose   # validate with detailed output
+  ahn-downloader --laz-output ./laz --las-output ./las --las  # separate LAZ and LAS dirs
   ahn-downloader -o ./data --max-size 20          # bigger area
   ahn-downloader -o ./data --source ahn4          # original AHN4 (no color)
   ahn-downloader -o ./data --bbox 119000 485000 123000 489000
   ahn-downloader --dry-run                        # preview tile selection
 
   ahn-downloader convert -i ./data -o ./data/las  # convert existing LAZ → LAS
+  ahn-downloader convert -i ./data -o ./las --point-format 7  # convert to format 7
+  ahn-downloader convert -i ./data -o ./las --remove-empty    # remove invalid LAZ files
   ahn-downloader merge   -i ./data -o ./merged    # merge tiles (requires PDAL)
   ahn-downloader gui     -o ./data                # interactive map selector
+  ahn-downloader validate -i ./data               # validate file integrity
+  ahn-downloader validate -i ./data --remove-invalid  # validate and delete bad files
 """
 
 from __future__ import annotations
@@ -42,7 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # Download is the default action — these args live on the root parser
     parser.add_argument("-o", "--output", type=Path, default=None,
-                        help="Download directory (required unless --dry-run)")
+                        help="Download directory (required unless --dry-run). For compatibility; prefer --laz-output")
+    parser.add_argument("--laz-output", type=Path, default=None,
+                        help="LAZ download directory (defaults to --output)")
+    parser.add_argument("--las-output", type=Path, default=None,
+                        help="LAS output directory (defaults to --output/las or --laz-output/las)")
     parser.add_argument("--source", choices=[s.value for s in DataSource],
                         default=DataSource.AHN5_COLORED.value,
                         help="Data source (default: ahn5-colored)")
@@ -54,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Parallel downloads (auto-limited per source)")
     parser.add_argument("-w", "--workers", type=int, default=4,
                         help="Parallel LAZ→LAS conversion workers")
+    parser.add_argument("--validate", action="store_true",
+                        help="Validate file integrity after download/conversion")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show detailed validation output (use with --validate)")
+    parser.add_argument("--point-format", type=int, default=None,
+                        metavar="FORMAT",
+                        help="LAS point record format for conversion (e.g., 6, 7, 8). Use with --las")
 
     # Spatial selection
     area = parser.add_argument_group("area selection")
@@ -73,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_conv.add_argument("-i", "--input", type=Path, required=True)
     p_conv.add_argument("-o", "--output", type=Path, default=None)
     p_conv.add_argument("-w", "--workers", type=int, default=4)
+    p_conv.add_argument("--point-format", type=int, default=None,
+                        metavar="FORMAT",
+                        help="LAS point record format (e.g., 6, 7, 8)")
+    p_conv.add_argument("--remove-empty", action="store_true",
+                        help="Delete empty/invalid source LAZ files")
 
     p_merge = sub.add_parser("merge", help="Merge tiles into chunks (PDAL)")
     p_merge.add_argument("-i", "--input", type=Path, required=True)
@@ -85,6 +109,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_gui.add_argument("--source", choices=[s.value for s in DataSource],
                        default=DataSource.AHN5_COLORED.value)
     p_gui.add_argument("-t", "--threads", type=int, default=None)
+
+    p_validate = sub.add_parser("validate", help="Validate LAZ/LAS file integrity")
+    p_validate.add_argument("-i", "--input", type=Path, required=True,
+                            help="Directory containing LAZ/LAS files")
+    p_validate.add_argument("-v", "--verbose", action="store_true",
+                            help="Show validation status for each file")
+    p_validate.add_argument("--remove-invalid", action="store_true",
+                            help="Delete invalid files")
 
     return parser
 
@@ -136,28 +168,40 @@ def cmd_download(args):
     if args.dry_run or not tiles:
         return
 
-    if args.output is None:
-        print("ERROR: -o/--output is required (or use --dry-run)", file=sys.stderr)
+    # Determine LAZ output directory
+    laz_dir = args.laz_output or args.output
+    if laz_dir is None:
+        print("ERROR: -o/--output or --laz-output is required (or use --dry-run)", file=sys.stderr)
         sys.exit(1)
 
     threads = _get_threads(args, source)
-    download_tiles(tiles, args.output, threads=threads)
+    download_tiles(tiles, laz_dir, threads=threads)
     print("Download complete.")
 
-    from .check import print_summary
-    print_summary(args.output)
+    from .check import print_summary, validate_files
+    print_summary(laz_dir)
+
+    if args.validate:
+        if not validate_files(laz_dir, verbose=args.verbose):
+            print("⚠ WARNING: Some LAZ files failed validation", file=sys.stderr)
 
     if args.las:
         from .convert import convert_laz_to_las
-        las_dir = args.output / "las"
-        convert_laz_to_las(args.output, las_dir, workers=args.workers)
+        # Determine LAS output directory
+        las_dir = args.las_output or (laz_dir / "las")
+        convert_laz_to_las(laz_dir, las_dir, workers=args.workers, point_format=args.point_format)
         print_summary(las_dir)
+
+        if args.validate:
+            if not validate_files(las_dir, verbose=args.verbose):
+                print("⚠ WARNING: Some LAS files failed validation", file=sys.stderr)
 
 
 def cmd_convert(args):
     from .convert import convert_laz_to_las
     out = args.output if args.output is not None else args.input
-    convert_laz_to_las(args.input, args.output, workers=args.workers)
+    convert_laz_to_las(args.input, args.output, workers=args.workers, 
+                       point_format=args.point_format, remove_empty=args.remove_empty)
 
     from .check import print_summary
     print_summary(out)
@@ -192,6 +236,12 @@ def cmd_gui(args):
         print_summary(args.output)
 
 
+def cmd_validate(args):
+    from .check import validate_files
+    valid = validate_files(args.input, verbose=args.verbose, remove_invalid=args.remove_invalid)
+    sys.exit(0 if valid else 1)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────────────────────────────
@@ -200,6 +250,7 @@ COMMANDS = {
     "convert": cmd_convert,
     "merge": cmd_merge,
     "gui": cmd_gui,
+    "validate": cmd_validate,
 }
 
 

@@ -7,6 +7,7 @@ import requests
 from tqdm import tqdm
 
 from .tiles import Tile
+from .validation import is_valid_laz_file
 
 DEFAULT_THREADS = 5
 BLOCK_SIZE = 8192  # 8 KiB
@@ -53,8 +54,14 @@ def _download_one(
         head.raise_for_status()
         remote_size = int(head.headers.get("content-length", 0))
         if dest.exists() and dest.stat().st_size == remote_size:
-            tqdm.write(f"[{index}] {dest.name} already complete — skipped")
-            return dest
+            # Validate the existing file
+            is_valid, error_msg = is_valid_laz_file(dest)
+            if is_valid:
+                tqdm.write(f"[{index}] {dest.name} already complete — skipped")
+                return dest
+            else:
+                tqdm.write(f"[{index}] {dest.name} exists but invalid ({error_msg}) — redownloading")
+                dest.unlink()
     except requests.RequestException as exc:
         tqdm.write(f"[{index}] HEAD failed for {url}: {exc}")
         return None
@@ -75,6 +82,13 @@ def _download_one(
             for chunk in resp.iter_content(chunk_size=BLOCK_SIZE):
                 fh.write(chunk)
                 bar.update(len(chunk))
+
+        # Validate the downloaded file
+        is_valid, error_msg = is_valid_laz_file(dest)
+        if not is_valid:
+            tqdm.write(f"[{index}] {dest.name} is invalid ({error_msg}) — removed")
+            dest.unlink()
+            return None
 
         return dest
     except requests.RequestException as exc:
